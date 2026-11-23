@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/ChmaraX/herdr-chat/compare/v0.6.0...v0.6.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **chat:** a dialog with a multi-line title keeps its options and the chat in view ([#52](https://github.com/ChmaraX/herdr-chat/issues/52)) ([7c18b61](https://github.com/ChmaraX/herdr-chat/commit/7c18b61b8420c56a6be2dc1d97cbdd327000b5b9))
+
 ## [0.6.0](https://github.com/ChmaraX/herdr-chat/compare/v0.5.0...v0.6.0) (2026-11-21)
 
 
