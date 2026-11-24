@@ -144,7 +144,10 @@ export class ClaudeAdapter implements ProviderAdapter {
       ...this.opts.args,
     ];
     host.log(`spawn ${this.opts.command} ${args.join(" ")}`);
-    const env = agentEnv({ CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1" });
+    // CLAUDE_CODE_ARTIFACT: the CLI turns the Artifact tool off by default under the SDK / -p
+    // ("sdk_default_off", unless this env is truthy); the chat is a person's session, as the TUI is.
+    // The person's own enableArtifact:false or CLAUDE_CODE_DISABLE_ARTIFACT still wins.
+    const env = agentEnv({ CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_ARTIFACT: "1" });
     delete env.NODE_OPTIONS; // the inspector or ESM loaders break the CLI (as the SDK does)
     const p = new ClaudeProcess({ command: this.opts.command, args, cwd: this.opts.cwd, env });
     this.proc = p;
