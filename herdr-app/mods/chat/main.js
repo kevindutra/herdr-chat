@@ -1791,6 +1791,13 @@ export default class HerdrChat extends View {
       else this.log(`codesel: no code block ${key}`);
       return;
     }
+    // pane:<pane id>:<shortcut>: a shortcut for the chat in that pane only (another mod's palette
+    // names the focused pane; every chat copy hears it, the others ignore it).
+    if (c.startsWith("pane:")) {
+      const [, pane, what] = c.split(":");
+      if (pane && pane === this.myPane()?.pane && what in SHORTCUTS) this.shortcut(what, cx);
+      return;
+    }
     if (c === "focus") this.focusInput(); else if (c.startsWith("toggle:")) this.toggle(c.slice(7), cx);
     else if (c.startsWith("click:")) this.control(c.slice(6), cx);
     else if (c.startsWith("scroll:by:")) {
