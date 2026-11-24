@@ -2222,6 +2222,8 @@ export default class HerdrChat extends View {
       t, mono: monoFont(), expanded: this.expanded, full: this.full, cwd: this.cwd, colW: this.colW(), now: Date.now(),
       codeBg: t.background, line: alpha(t.border, 0.7), hover: this.hover, activity: this.activity(),
       codeView: (key) => this.codeViews.get(key)?.entity ?? null,
+      // A released view (rich.js): forget it, so the next record rebuilds it (setCodeProps).
+      dropCodeView: (key) => { this.codeViews.delete(key); this.codeSel.delete(key); this.log(`code view ${key} was released: rebuilt`); },
       toggle: (id, cx) => this.toggle(id, cx), more: (id, cx) => this.more(id, cx),
       copy: (id, text, cx) => this.copy(id, text, cx), copied: (id) => this.copiedAt.has(id),
       enlarge: (p, size, cx) => this.enlarge(p, size, cx), svgSize: (p) => this.svgSize(p), traceThumb: (p, w, h) => this.thumbsSeen?.add(p, w, h),

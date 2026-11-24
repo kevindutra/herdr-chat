@@ -79,11 +79,20 @@ export function blocks(it, c) {
     const e = edges(b);
     const gap = above(e.first, prev && { heading: prev.last });
     prev = e;
-    let el;
-    if (b.type === "code") el = (!b.open && c.codeView?.(key)) || codeCard(key, b.lang, b.code ?? "", b.lines, b.open, c);
-    else if (b.type === "mermaid") el = mermaid(key, b, c);
-    else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text);
-    return div().pt(gap).child(el);
+    const plain = () => (b.type === "code" ? codeCard(key, b.lang, b.code ?? "", b.lines, b.open, c) : markdown(`md-${it.id}-${i}`, b.text));
+    if (b.type === "mermaid") return div().pt(gap).child(mermaid(key, b, c));
+    const view = b.type === "code" && b.open ? null : c.codeView?.(key);
+    if (!view) return div().pt(gap).child(plain());
+    // A retained view can be released under us (a failed update rolls back the
+    // views it made, but not the chat's Map of them): draw the block plainly and
+    // have the chat forget the dead view, else every render of the chat fails.
+    try {
+      return div().pt(gap).child(view);
+    } catch (e) {
+      if (!/released/i.test(String(e?.message ?? e))) throw e;
+      c.dropCodeView?.(key);
+      return div().pt(gap).child(plain());
+    }
   }));
 }
 

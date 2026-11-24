@@ -252,6 +252,24 @@ async function stillRuns(address, cfg, group, cx) {
   return running;
 }
 
+/**
+ * The terminal half of the chat ⇄ terminal toggle (`new-chat.toggle`, bound in keys.json's
+ * `terminal` section; in a chat the same chord is the chat's own `tui` key):
+ * - the agent TUI a chat handed its session to (/tui, label herdr-chat.tui): back to that chat.
+ *   Idle, at once (the TUI ends, the host resumes the chat, the chat takes the focus back);
+ *   working, the hand-off bar's confirm (termbar.js), or a toast when it was opened as a tab;
+ * - any other agent TUI: Continue as chat.
+ */
+export async function toggleTerminal(cx) {
+  const t = term(focused()?.terminal);
+  if (!t?.labels?.["herdr-chat.tui"]) return continueAsChat("", cx);
+  const st = word(t.status);
+  if (st !== "working" && st !== "blocked") return run("terminal.kill", { terminal: t.address });
+  const inDialog = !panes().some((p) => p.terminal === t.address);
+  if (inDialog) return run("chat.termbar:back");
+  toast({ title: "Back to chat", body: `${NAMES[agentOf(t)] ?? "The agent"} is working: let the run end (or stop it), then press again.`, level: "info" });
+}
+
 // The floating block: commands only, nothing drawn.
 class Commands {
   constructor(cx) {
@@ -277,6 +295,7 @@ class Commands {
           if (c === "open") run("mod.open", { name: "new-chat" });
           else if (CHOICES.some((x) => x.id === c)) await openChat(c);
           else if (c === "continue" || c.startsWith("continue:")) await continueAsChat(c.slice(9), cx);
+          else if (c === "toggle") await toggleTerminal(cx);
           else if (c === "update-check") await updates(true);
         } catch (e) {
           toast({ title: c.startsWith("continue") ? "Continue as chat" : "New chat", body: String(e?.message ?? e), level: "error" });
