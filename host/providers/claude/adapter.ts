@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { ClaudeProcess } from "./process.ts";
 import type { ClaudeRecord } from "./process.ts";
 import { ClaudeMapper } from "./mapper.ts";
-import { mcpFailureNotice } from "../mcp.ts";
+import { claudeMcpToReport, mcpFailureNotice } from "../mcp.ts";
 import { agentEnv } from "../env.ts";
 import type { Priority } from "./mapper.ts";
 import { historyEvents, hasMessages, forkPoints } from "./history.ts";
@@ -325,8 +325,8 @@ export class ClaudeAdapter implements ProviderAdapter {
           this.emitModel();
         }
         // init comes with every turn: each failed MCP server is told once, all of one init in one notice.
-        const failed = (Array.isArray(rec.mcp_servers) ? rec.mcp_servers : [])
-          .filter((m: Rec) => (m?.status === "failed" || m?.status === "needs-auth") && typeof m.name === "string" && !this.mcpReported.has(m.name));
+        // (claude.ai account connectors never signed in stay quiet, as in the TUI: claudeMcpToReport.)
+        const failed = claudeMcpToReport(Array.isArray(rec.mcp_servers) ? rec.mcp_servers : [], this.mcpReported);
         for (const m of failed) this.mcpReported.add(m.name);
         if (failed.length) this.emit({ type: "notice", level: "warning", source: "notify", text: mcpFailureNotice(failed.map((m: Rec) => ({ name: m.name, auth: m.status === "needs-auth", detail: m.status === "needs-auth" ? "needs OAuth sign-in" : "failed to connect" })), "run /mcp in /tui") });
         return;
