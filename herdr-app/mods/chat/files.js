@@ -27,8 +27,11 @@ async function editorArgv() {
   return editorCache;
 }
 
-// {path (absolute), line, cwd, tab, space} → {how: "herdr-nvim" | "editor", terminal?}
+// {path (absolute), line, cwd, tab, space, machine?} → {how: "herdr-nvim" | "editor", terminal?}
+// `machine`: the chat's (machine.js): the file is there, so the editor runs there ($VISUAL/$EDITOR of
+// its login shell, else vi), in a pane of the chat's tab (labels as that machine's core names them).
 export async function openFile(o) {
+  if (o.machine) return openRemote(o);
   const nvim = await herdrNvim();
   if (nvim && o.tab) {
     const args = ["open", "--tab", String(o.tab)];
@@ -44,4 +47,17 @@ export async function openFile(o) {
     "--label", `herdr.tab=${o.tab}`, "--label", "herdr-chat.editor=1", "--", ...argv]);
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "hc run failed");
   return { how: "editor", terminal: JSON.parse(r.stdout).address, argv };
+}
+
+const strip = (m, id) => (String(id ?? "").startsWith(`${m}/`) ? String(id).slice(m.length + 1) : id);
+
+async function openRemote(o) {
+  const m = o.machine;
+  if (!o.space || !o.tab) throw new Error("no tab to open the editor in");
+  // Its login shell picks the editor and opens it (+line for the vi family), so its PATH is there too.
+  const script = 'ed="${VISUAL:-${EDITOR:-vi}}"; case "${ed%% *}" in *vi|*vim|*nvim|*hx|*helix|*kak|*micro|*nano|*emacs) exec $ed "+$2" "$1" ;; *) exec $ed "$1" ;; esac';
+  const r = await hc(["run", "--bg", "--json", "--no-parent", "--on", m, "--cwd", o.cwd ?? "/", "--label", `herdr.space=${strip(m, o.space)}`,
+    "--label", `herdr.tab=${strip(m, o.tab)}`, "--label", "herdr-chat.editor=1", "--", "/bin/sh", "-lc", script, "sh", o.path, String(o.line || 1)]);
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "hc run failed");
+  return { how: "editor", terminal: JSON.parse(r.stdout).address, argv: ["$EDITOR", o.path] };
 }

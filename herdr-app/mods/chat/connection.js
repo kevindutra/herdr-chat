@@ -1,13 +1,21 @@
 import { appHome, hc, readTextFile, terminals } from "herdr";
 import { openLink } from "./transport.js";
 import { DEFAULT_PROVIDER, MOD, message } from "./util.js";
+import { qualify, readText, remoteHome, tunnel } from "./machine.js";
 
 export const stateDir = () => `${appHome()}/data/herdr-chat`;
 export const registryPath = (chat) => `${stateDir()}/chats/${chat}.json`;
 
-async function readJson(path) {
+/** Where herdr-chat lives on machine `m` (null: this computer): {appHome, stateDir}. */
+export async function dirsOf(m) {
+  if (!m) return { appHome: appHome(), stateDir: stateDir() };
+  const r = await remoteHome(m);
+  return { appHome: r.appHome, stateDir: r.stateDir };
+}
+
+async function readJson(path, m = null) {
   try {
-    return JSON.parse((await readTextFile(path)) ?? "{}") ?? {};
+    return JSON.parse((await readText(m, path, readTextFile)) ?? "{}") ?? {};
   } catch {
     return {};
   }
@@ -19,11 +27,13 @@ export const settingsPath = () => `${stateDir()}/settings.json`;
 /**
  * What install wrote (mods/chat/config.json: the host, node, hc and each agent
  * it found) with the person's settings over it. One agent's:
- * {command, args, env, tui}, `tui` an argv or null.
+ * {command, args, env, tui}, `tui` an argv or null. `m`: another machine's
+ * (install/machine.sh wrote its config.json there; its settings.json is there too).
  */
-export async function readConfig() {
-  const cfg = await readJson(`${appHome()}/mods/${MOD}/config.json`);
-  const mine = await readJson(settingsPath());
+export async function readConfig(m = null) {
+  const dirs = await dirsOf(m);
+  const cfg = await readJson(`${dirs.appHome}/mods/${MOD}/config.json`, m);
+  const mine = await readJson(`${dirs.stateDir}/settings.json`, m);
   const list = (v) => (Array.isArray(v) ? v.map(String) : typeof v === "string" && v ? [v] : null);
   const agent = (id) => {
     const a = mine[id] && typeof mine[id] === "object" ? mine[id] : {};
@@ -34,13 +44,18 @@ export async function readConfig() {
       tui: list(a.tui),
     };
   };
-  return { host: cfg.host ?? null, node: cfg.node ?? null, hc: cfg.hc ?? null, version: cfg.version ?? null, build: cfg.build ?? null, installedAt: cfg.installedAt ?? null, agent };
+  return { host: cfg.host ?? null, node: cfg.node ?? null, hc: cfg.hc ?? null, path: cfg.path ?? null, version: cfg.version ?? null, build: cfg.build ?? null, installedAt: cfg.installedAt ?? null, agent };
 }
 
-export async function readRegistry(chat) {
+/** A chat's registry entry (on machine `m`, null: this one). Its `terminal` is as the app names it
+ *  ("air/t7" for another machine's: the host wrote its own $HC_TERMINAL_ID, bare). */
+export async function readRegistry(chat, m = null) {
   try {
-    const text = await readTextFile(registryPath(chat));
-    return text ? JSON.parse(text) : null;
+    const dirs = await dirsOf(m);
+    const text = await readText(m, `${dirs.stateDir}/chats/${chat}.json`, readTextFile);
+    const entry = text ? JSON.parse(text) : null;
+    if (entry && m) entry.terminal = qualify(m, entry.terminal);
+    return entry;
   } catch {
     return null;
   }
@@ -161,7 +176,8 @@ export class Connection {
 
   // One connection attempt and, when it works, its whole read loop.
   async once(cx) {
-    const entry = await readRegistry(this.o.chat);
+    const m = this.o.machine ?? null;
+    const entry = await readRegistry(this.o.chat, m);
     this.entry = entry;
     if (!entry?.port || !entry?.pid) {
       await this.ensureHost(cx, entry);
@@ -169,8 +185,10 @@ export class Connection {
     }
     let link;
     try {
-      link = await openLink(entry);
+      // Another machine's host listens on its own 127.0.0.1: reach it through the chat's tunnel.
+      link = await openLink(m ? { wsPort: await tunnel(m, this.o.chat, entry.wsPort, this.o.log) } : entry);
     } catch (e) {
+      this.o.log?.(`link: ${message(e)}`);
       await this.ensureHost(cx, entry);
       return;
     }
@@ -247,7 +265,16 @@ export class Connection {
     }
     const started = (this.started = { address: null, at: Date.now() });
     this.set("starting", null, cx);
-    const cfg = await readConfig();
+    const m = this.o.machine ?? null;
+    let cfg, dirs;
+    try {
+      [cfg, dirs] = await Promise.all([readConfig(m), dirsOf(m)]);
+      if (!this.o.cwd) this.o.cwd = m ? (await remoteHome(m)).home : ".";
+    } catch (e) {
+      this.started = null;
+      this.set("connecting", `can't reach ${m}: ${message(e)}`, cx); // a machine that's down: tried again
+      return;
+    }
     // The chat's agent: its props, else what the registry recorded (a reopened chat keeps it).
     const provider = this.o.provider ?? entry?.provider ?? DEFAULT_PROVIDER;
     this.provider = provider;
@@ -256,11 +283,15 @@ export class Connection {
     if (!host) {
       this.started = null;
       this.startFailed = true;
-      this.set("failed", `mods/${MOD}/config.json has no "host"`, cx);
+      this.set("failed", m ? `herdr-chat isn't installed on ${m}: run install/machine.sh ${m} from your herdr-chat folder` : `mods/${MOD}/config.json has no "host"`, cx);
       return;
     }
     const env = { ...agent.env, ...(this.o.hostEnv ?? {}) };
     if (cfg.node) env.HERDR_CHAT_NODE = cfg.node;
+    // Another machine's core terminals don't get its login PATH (a core started over ssh):
+    // the install recorded it, and the hc there, for the host and the agent's tools.
+    if (m && cfg.hc) env.HERDR_CHAT_HC = cfg.hc;
+    if (m && cfg.path) env.PATH = cfg.path;
     const session = this.o.session ?? entry?.sessionFile ?? null;
     const args = [
       // No --name: the registry and the herdr-chat.chat label identify it, and
@@ -268,10 +299,10 @@ export class Connection {
       // labels yet: the app would adopt it as a visible pane. The chat adds
       // its pane, hidden, to the layout document, then labels it (main.js
       // keepHostHidden). --keep: the core keeps it, as adoption would.
-      "run", "--bg", "--json", "--keep", "--no-parent", "--cwd", this.o.cwd,
+      "run", "--bg", "--json", "--keep", "--no-parent", ...(m ? ["--on", m] : []), "--cwd", this.o.cwd,
       "--label", `herdr-chat.chat=${this.o.chat}`, "--label", "herdr-chat.role=host",
       "--", "/usr/bin/env", ...Object.entries(env).map(([k, v]) => `${k}=${v}`),
-      host, "serve", "--chat", this.o.chat, "--cwd", this.o.cwd, "--state-dir", stateDir(), "--app-home", appHome(), "--provider", provider,
+      host, "serve", "--chat", this.o.chat, "--cwd", this.o.cwd, "--state-dir", dirs.stateDir, "--app-home", dirs.appHome, "--provider", provider,
       ...(session ? ["--session", session] : []),
       // A Pi TUI this chat takes over: the host waits for its pid, then uses its model and
       // thinking (only while that pid lives: a later restart of the chat ignores them).

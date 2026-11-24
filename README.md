@@ -139,10 +139,44 @@ runs). A new chat picks up a change. `updates.check: false` stops the daily
 look for a new release (a release install only); `updates.feed` points it at
 another URL with GitHub's release JSON.
 
+## Other machines
+
+A chat in another machine's space (`hc machine add`) runs on that machine:
+its host, the agent and the session are there, and this window draws it.
+New chat in one of its spaces and Continue as chat on one of its agents
+work as they do here. Install the host there once, from a clone on this
+computer:
+
+```sh
+install/machine.sh <machine>     # a name from `hc machine ls`
+```
+
+It builds the release, copies it over `hc`, and writes that machine's
+`~/.config/herdr-app/mods/chat/config.json` (its node, hc, agents and login
+PATH). That machine needs herdr-core, Node 20+ and an agent, not the Herdr
+app. Run it again to update it.
+
+How it reaches the chat ([herdr-app/mods/chat/machine.js](herdr-app/mods/chat/machine.js)):
+
+- The host listens on that machine's 127.0.0.1. Each chat gets an
+  `ssh -N -L` tunnel in a hidden local hc terminal (`herdr-chat.tunnel`
+  labels), to the target `hc machine ls` shows. It ends with the chat's view,
+  or at the next orphan sweep.
+- The chat's pane and the host's hidden pane are in that machine's layout
+  document, read and written over `hc exec -i --on <machine> hc connect`.
+- Images (tool results, your messages, diagrams) are copied into
+  `data/herdr-chat/remote/<machine>/<their path>` here, so they show.
+  A pasted or dropped image is copied there and attached by the host.
+- Files open in that machine's `$VISUAL`/`$EDITOR` (vi), in a pane of the
+  chat's tab; `/tui` runs the agent's TUI there.
+
+Not yet: Continue as chat on another machine's sub-agent, and the restart
+question after an install (a remote chat restarts with `/reload`).
+
 ## Limitations
 
-- **This computer only.** Chats run on this computer only: in another machine's space,
-  New chat and Continue as chat say so.
+- **Another machine needs ssh.** A machine added with `--via` has no tunnel
+  for the chat's socket; see "Other machines".
 - **The end-to-end tests drive macOS only** (`tests/e2e/`); on Linux the
   host's tests run, and the mods were tried by hand.
 - **Run the install again after a Herdr update.** The agents list and the

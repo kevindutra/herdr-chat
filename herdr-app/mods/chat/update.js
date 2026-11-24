@@ -39,10 +39,12 @@ export function quiet(s, hostAddress) {
 }
 
 export class Updater {
-  /** sub: a sub-agent's chat (never restarted); log: the view's log. */
-  constructor({ sub, log }) {
+  /** sub: a sub-agent's chat (never restarted); log: the view's log; machine: the chat's (its host
+   *  is compared with that machine's install, install/machine.sh). */
+  constructor({ sub, log, machine = null }) {
     this.sub = sub;
     this.log = log;
+    this.machine = machine;
     this.cfg = null; // config.json as of the last welcome
     this.wanted = false; // the person asked (bar, /reload, the question for every chat)
     this.triedFor = null; // the install build a restart was tried for
@@ -50,7 +52,7 @@ export class Updater {
   }
 
   async load() {
-    this.cfg = await readConfig();
+    this.cfg = await readConfig(this.machine).catch(() => this.cfg); // a machine that's down: the last one read
   }
 
   /** The one rule: this chat can restart onto the install. */

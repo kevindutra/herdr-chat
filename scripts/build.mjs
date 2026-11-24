@@ -50,6 +50,8 @@ const shipped = (src) => !/(^|\/)(\.[^/]*|gpui-kit\.d\.ts|herdr\.d\.ts|jsconfig\
 for (const p of ["bin", "herdr-app/mods", "extension"]) cpSync(join(ROOT, p), join(tree, p), { recursive: true, filter: shipped });
 for (const f of ["install.sh", "LICENSE", "README.md", "CHANGELOG.md"]) if (existsSync(join(ROOT, f))) cpSync(join(ROOT, f), join(tree, f));
 cpSync(join(ROOT, "install", "app.sh"), join(tree, "install", "app.sh"));
+// Another machine's host install (install/machine.sh runs this there).
+cpSync(join(ROOT, "install", "machine-setup.sh"), join(tree, "install", "machine-setup.sh"));
 const release = {
   name: pkg.name, version, private: true, type: "module", description: pkg.description, license: pkg.license,
   repository: pkg.repository, homepage: pkg.homepage, engines: { node: `>=${NODE_MIN}` }, herdr: pkg.herdr,

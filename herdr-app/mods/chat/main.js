@@ -28,13 +28,14 @@
 import { View, div } from "gpui-kit";
 import { fps_monitor } from "gpui-fps";
 import { v_flex, h_flex, Popup } from "gpui-base";
-import { agents, appHome, closeOverlay, focused, hc, home, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
+import { agents, appHome, closeOverlay, exec, focused, hc, home, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
 import { randomBytes } from "crypto";
 import { modPanes, readDoc } from "./place.js";
 import { getDoc, hideHost, locate } from "./hostpane.js";
 import { SHORTCUTS, actionName, chordOf, errors as keyErrors, keyHint, loadShortcuts, shortcuts, withKey } from "./shortcuts.js";
 import { keepKeys } from "./keymap.js";
-import { Connection, readConfig, readRegistry, registeredHost, runsHost } from "./connection.js";
+import { Connection, dirsOf, readConfig, readRegistry, registeredHost, runsHost } from "./connection.js";
+import { Mirror, allTunnels, argsToHost, bare, clipboardPng, closeTunnels, machineOf, mapPaths, qualify, upload } from "./machine.js";
 import { Store } from "./store.js";
 import { Timeline } from "./timeline.js";
 import { lineOf, planProgress, row, samePlan } from "./cards.js";
@@ -85,7 +86,14 @@ export default class HerdrChat extends View {
     this.peekMode = Boolean(p.peek);
     this.provider = p.provider ?? null; // an id of PROVIDERS; null: the registry's, else DEFAULT_PROVIDER
     this.cwd = p.cwd || null;
+    // The machine the chat runs on (`hc machine`, machine.js), null: this computer. Its host, agent,
+    // session and files are there; its pane is in that machine's layout document.
+    this.machine = p.machine || null;
     this.store = new Store();
+    if (this.machine) {
+      this.mirror = new Mirror(this.machine, (cx) => { if (this.store.remap()) { this.debug?.mark(); cx.notify(); } }, (m) => this.log(m));
+      this.store.mapItem = (it) => mapPaths(it, (p) => this.mirror.want(p));
+    }
     this.timeline = new Timeline("herdr-chat-timeline", uiScale);
     this.expanded = new Set();
     this.full = new Map();
@@ -140,7 +148,8 @@ export default class HerdrChat extends View {
     });
     this.conn = new Connection({
       chat: this.chat,
-      cwd: this.cwd ?? home(),
+      machine: this.machine,
+      cwd: this.cwd ?? (this.machine ? null : home()), // another machine's: its home (connection.js)
       session: p.session ?? null,
       provider: this.provider,
       hostEnv: p.hostEnv ?? null,
@@ -154,7 +163,7 @@ export default class HerdrChat extends View {
       log: (m) => this.log(m),
     });
     if (!this.cwd) this.cwd = p.cwd ?? null;
-    this.updater = new Updater({ sub: Boolean(this.sub), log: (m) => this.log(m) }); // a host older than the install (update.js)
+    this.updater = new Updater({ sub: Boolean(this.sub), log: (m) => this.log(m), machine: this.machine }); // a host older than the install (update.js)
     cx.spawn(async (cx) => { await this.updater.load(); this.debug.mark(); cx.notify(); });
     this.conn.start(cx);
     this.commands(cx);
@@ -208,8 +217,8 @@ export default class HerdrChat extends View {
     this.placeTried = Date.now();
     cx.spawn(async (cx) => {
       try {
-        const doc = await readDoc();
-        this.docPanes = modPanes(doc, MOD);
+        const doc = await readDoc(this.machine);
+        this.docPanes = modPanes(doc, MOD, this.machine);
         this.docAt = Date.now();
         const live = this.docPanes.filter((x) => x.props?.chat === this.chat).find((x) => panes().some((p) => p.pane === x.pane));
         if (live) {
@@ -233,9 +242,9 @@ export default class HerdrChat extends View {
   // No layout document (no hc on PATH?): the host's tab label, else the only chat pane.
   guessPlace() {
     const mine = panes().filter((p) => p.mod === MOD);
-    const hostTab = this.conn.hostTerminal()?.labels?.["herdr.tab"];
+    const hostTab = qualify(this.machine, this.conn.hostTerminal()?.labels?.["herdr.tab"]);
     const pane = (hostTab && mine.find((p) => p.tab === hostTab)) || (mine.length === 1 ? mine[0] : null);
-    if (!pane || String(pane.tab).includes("/")) return;
+    if (!pane || machineOf(pane.tab) !== this.machine) return;
     const space = spaces().find((sp) => sp.tabs.some((x) => x.id === pane.tab))?.id;
     if (!space) return;
     this.place = { pane: pane.pane, tab: pane.tab, space };
@@ -383,6 +392,7 @@ export default class HerdrChat extends View {
     }
     if (this.conn.status === "connected" && this.store.loaded) this.syncTheme(cx);
     if (this.svgWanted?.size) this.loadSizes(cx);
+    this.mirror?.pump(cx); // another machine's images: the copies the timeline asked for
     if (Date.now() - (this.sweptAt ?? 0) > 30000) this.sweepOrphans(cx);
     // Elapsed seconds (thinking, the activity line) while Pi works: data, once a second.
     const sec = Math.floor(Date.now() / 1000);
@@ -422,7 +432,7 @@ export default class HerdrChat extends View {
     }
     const term = this.conn.hostTerminal();
     if (term?.parent) return false; // a sub-agent is its parent's: never restarted from here
-    const label = term?.labels?.["herdr.tab"];
+    const label = qualify(this.machine, term?.labels?.["herdr.tab"]); // another machine's labels are bare
     const docTab = this.hide?.terminal === term?.address ? this.hide?.tab : null;
     const tab = label || docTab;
     if (!term || !tab || this.placeFrom !== "doc" || !this.place || tab === this.place.tab) return false;
@@ -489,8 +499,12 @@ export default class HerdrChat extends View {
     h.stale = false;
     cx.spawn(async (cx) => {
       try {
-        const { value } = await getDoc();
-        const at = locate(value, this.chat, term.address);
+        const m = this.machine;
+        const { value } = await getDoc(m);
+        // That machine's document names things bare: the ids here as the app names them.
+        const raw = locate(value, this.chat, bare(m, term.address));
+        const q = (x) => x && { ...x, pane: qualify(m, x.pane), tab: qualify(m, x.tab), space: qualify(m, x.space) };
+        const at = { chat: q(raw.chat), host: q(raw.host) };
         h.checkedAt = Date.now();
         const was = h.hidden;
         h.pane = at.host?.pane ?? null;
@@ -505,7 +519,7 @@ export default class HerdrChat extends View {
           const recent = h.writes.filter((t) => Date.now() - t < 20000);
           if (recent.length >= 3) return this.fallbackHide(term, `the hidden flag didn't stick (${recent.length} writes in 20 s)`, cx);
           // The app's own change goes first; after ~20 s of that (a mismatch inStep can't explain), write anyway.
-          const r = await hideHost(this.place.tab, term.address, { force: (h.waiting ?? 0) >= 20, beforeWrite: () => this.beforeAppRead(term.address, cx) });
+          const r = await hideHost(this.place.tab, term.address, { machine: m, force: (h.waiting ?? 0) >= 20, beforeWrite: () => this.beforeAppRead(term.address, cx) });
           if (r.did === "waiting") {
             h.waits = (h.waits ?? 0) + 1;
             h.waiting = (h.waiting ?? 0) + 1;
@@ -525,7 +539,7 @@ export default class HerdrChat extends View {
         if (!term.labels?.["herdr.tab"] && !h.labeling) {
           h.labeling = true;
           const { space, tab } = this.place;
-          const r = await hc(["label", term.address, `herdr.space=${space}`, `herdr.tab=${tab}`]);
+          const r = await hc(["label", term.address, `herdr.space=${bare(m, space)}`, `herdr.tab=${bare(m, tab)}`]);
           h.labeling = false;
           if (r.code !== 0) this.log(`hc label ${term.address}: ${(r.stderr || r.stdout).trim()}`);
           else this.log(`host ${term.address}: labeled for tab ${tab}`);
@@ -593,7 +607,7 @@ export default class HerdrChat extends View {
       if (term.labels?.["herdr.tab"] || f.labeled) return;
       f.labeled = true;
       const { space, tab } = this.place;
-      cx.spawn(async () => { await hc(["label", term.address, `herdr.space=${space}`, `herdr.tab=${tab}`]); });
+      cx.spawn(async () => { await hc(["label", term.address, `herdr.space=${bare(this.machine, space)}`, `herdr.tab=${bare(this.machine, tab)}`]); });
       return;
     }
     if (px === 0 || (f.resized === pane.pane && Date.now() - f.resizedAt < 3000)) return; // (px: what the document says)
@@ -659,10 +673,25 @@ export default class HerdrChat extends View {
   sweepOrphans(cx) {
     this.sweptAt = Date.now();
     cx.spawn(async () => {
-      let doc;
-      try { doc = await readDoc(); } catch { return; }
-      if (!doc?.spaces) return;
-      this.docPanes = modPanes(doc, MOD);
+      // Each machine's chats are in its own layout document (machine.js): read this computer's, and
+      // each other machine's that has a chat host or a chat's tunnel. A machine whose document
+      // can't be read now has its hosts left alone this round.
+      const hostMachines = new Set(terminals().filter((t) => t.state === "live" && t.labels?.["herdr-chat.chat"]).map((t) => machineOf(t.address)));
+      const machines = new Set([null, ...hostMachines]);
+      const tunnels = allTunnels();
+      if (tunnels.length) for (const t of terminals()) if (t.labels?.["herdr-chat.tunnel.to"]) machines.add(t.labels["herdr-chat.tunnel.to"].split(":")[0]);
+      const read = new Set(); // machines whose document was read
+      const all = [];
+      for (const m of machines) {
+        try {
+          const doc = await readDoc(m);
+          if (!doc?.spaces) continue;
+          all.push(...modPanes(doc, MOD, m));
+          read.add(m);
+        } catch {}
+      }
+      if (!read.has(null)) return;
+      this.docPanes = all;
       this.docAt = Date.now();
       const chats = new Set(this.docPanes.map((x) => x.props?.chat).filter(Boolean));
       const registries = new Map(); // chat → its registry entry, read once per sweep
@@ -670,13 +699,15 @@ export default class HerdrChat extends View {
       for (const t of terminals()) {
         const chat = t.labels?.["herdr-chat.chat"];
         if (t.state !== "live" || !chat) continue;
+        const tm = machineOf(t.address);
+        if (!read.has(tm)) continue; // its machine's document couldn't be read: no verdict
         // A sub-agent (a parent, or the launcher's role=subagent) has no pane by design and is its parent's.
         if (runsHost(t) && (t.parent || t.labels?.["herdr-chat.role"] !== "host")) continue;
         let why = null;
         if (!runsHost(t)) why = `${t.address} is a shell restored in chat ${chat}'s host's place`;
         else if (!chats.has(chat)) why = `orphan host ${t.address} (chat ${chat} has no pane)`;
         else {
-          if (!registries.has(chat)) registries.set(chat, await readRegistry(chat));
+          if (!registries.has(chat)) registries.set(chat, await readRegistry(chat, tm));
           const host = registeredHost(registries.get(chat));
           if (host && host.address !== t.address) why = `${t.address} is a second host of chat ${chat} (its registry names ${host.address})`;
         }
@@ -685,6 +716,16 @@ export default class HerdrChat extends View {
         if (this.orphans?.get(t.address) !== why) continue;
         this.log(`${why}: ending it`);
         run("terminal.kill", { terminal: t.address });
+      }
+      // A chat's tunnel to another machine's host (machine.js) outlives its view only until here.
+      for (const tn of tunnels) {
+        const to = terminals().find((t) => t.address === tn.address)?.labels?.["herdr-chat.tunnel.to"]?.split(":")[0];
+        if (chats.has(tn.chat) || !read.has(to ?? null)) continue;
+        const why = `tunnel ${tn.address} of chat ${tn.chat}, which has no pane`;
+        toEnd.set(tn.address, why);
+        if (this.orphans?.get(tn.address) !== why) continue;
+        this.log(`${why}: ending it`);
+        hc(["kill", tn.address]).catch(() => {});
       }
       this.orphans = toEnd;
       // The host removes the attachments of chats closed while their host was down (protocol.md
@@ -806,7 +847,8 @@ export default class HerdrChat extends View {
     const entry = { op, at, ok: null };
     this.ops.push(entry);
     if (this.ops.length > 40) this.ops.shift();
-    return this.conn.req(op, args, opts).then((data) => {
+    // Another machine's chat shows its images from local copies (machine.js): the host gets its own paths.
+    return this.conn.req(op, argsToHost(this.machine, args), opts).then((data) => {
       entry.ok = true;
       entry.data = data;
       this.debug.mark();
@@ -913,6 +955,18 @@ export default class HerdrChat extends View {
   pasteImage(cx) {
     cx.spawn(async (cx) => {
       try {
+        // Another machine's host would read that machine's clipboard: this computer's goes to it instead.
+        if (this.machine) {
+          const local = `${appHome()}/data/herdr-chat/remote/_paste/${Date.now()}-${randomBytes(3).toString("hex")}-paste.png`;
+          if (!(await clipboardPng(local))) this.flash("The clipboard has no image", cx);
+          else {
+            const d = await this.remoteAttach(local, cx);
+            this.composer.addChip(d.path, { size: d.size ?? null });
+          }
+          this.debug.mark();
+          cx.notify();
+          return;
+        }
         const d = await this.req("clipboard_image", {}, cx);
         if (d?.path) this.composer.addChip(d.path, { size: d.size ?? null });
         else this.flash("The clipboard has no image", cx);
@@ -944,10 +998,25 @@ export default class HerdrChat extends View {
   // (attach_image), which the chip can show: a send in between carries the file itself, and a copy
   // the chip no longer holds goes again. A file the host refuses leaves with its reason. An older
   // host has no attach_image: the chip keeps the file.
+  // A local image file as an attachment of another machine's chat: copied there (uploads/<chat>/),
+  // attached by its host (attach_image), and that attachment copied into the local mirror, so the
+  // chip shows it and its path goes back as the host's (argsToHost). {path, size}.
+  async remoteAttach(local, cx) {
+    const m = this.machine;
+    const { stateDir } = await dirsOf(m);
+    const name = local.split("/").pop();
+    const remote = await upload(m, local, `${stateDir}/uploads/${this.chat}/${Date.now()}-${name}`);
+    const d = await this.req("attach_image", { path: remote }, cx);
+    const mirror = `${appHome()}/data/herdr-chat/remote/${m}${d.path}`;
+    await exec("/bin/sh", ["-c", 'mkdir -p "$(dirname "$2")" && cp "$1" "$2"', "sh", local, mirror]);
+    this.mirror?.state.set(d.path, "ok");
+    return { path: mirror, size: d.size ?? null };
+  }
+
   attachImage(chip, cx) {
     cx.spawn(async (cx) => {
       try {
-        const { path, size } = await this.req("attach_image", { path: chip.path }, cx);
+        const { path, size } = this.machine ? await this.remoteAttach(chip.path, cx) : await this.req("attach_image", { path: chip.path }, cx);
         if (this.composer.chips.includes(chip)) Object.assign(chip, { path, size: size ?? null });
         else this.req("detach_image", { path }).catch(() => {});
       } catch (e) {
@@ -1539,7 +1608,7 @@ export default class HerdrChat extends View {
     this.lastOpen = { path: abs, line, at: Date.now(), how: null };
     cx.spawn(async (cx) => {
       try {
-        const r = await openFile({ path: abs, line, cwd: this.cwd ?? this.store.state.cwd, pane: me?.pane, tab: me?.tab, space: this.place?.space });
+        const r = await openFile({ path: abs, line, cwd: this.cwd ?? this.store.state.cwd, pane: me?.pane, tab: me?.tab, space: this.place?.space, machine: this.machine });
         this.lastOpen.how = r.how;
         if (r.terminal) {
           this.editorTerm = { address: r.terminal, at: Date.now(), seen: false };
@@ -1765,10 +1834,12 @@ export default class HerdrChat extends View {
     this.debug.mark();
     cx.spawn(async (cx) => {
       try {
-        const cfg = await readConfig();
+        const m = this.machine;
+        const cfg = await readConfig(m);
         // The TUI's command: the adapter's (e.g. `claude --resume <id>`). The
         // person's settings `<agent>.tui` replaces the program, keeping its arguments.
-        const prog = cfg.agent(this.providerId()).tui;
+        // On another machine the agent runs there: its install's command, with its login PATH.
+        const prog = cfg.agent(this.providerId()).tui ?? (m && cfg.agent(this.providerId()).command ? [cfg.agent(this.providerId()).command] : null);
         let argv;
         if (mode === "session") {
           const d = await this.req("handoff", {}, cx, { timeout: 20000 });
@@ -1776,8 +1847,9 @@ export default class HerdrChat extends View {
           argv = prog ? withProgram(d.argv, prog) : [...d.argv];
         } else argv = prog ? withProgram(utilityArgv, prog) : [...utilityArgv];
         // No herdr.space/tab labels: no pane, so the layout and the chat's tab stay as they are.
-        const r = await hc(["run", "--bg", "--json", "--no-parent", "--name", `chat-tui-${this.chat}`, "--cwd", this.cwd ?? this.store.state.cwd ?? "/",
-          "--label", `herdr-chat.tui=${this.chat}`, "--", ...argv]);
+        const env = m && cfg.path ? ["/usr/bin/env", `PATH=${cfg.path}`] : [];
+        const r = await hc(["run", "--bg", "--json", "--no-parent", ...(m ? ["--on", m] : []), "--name", `chat-tui-${this.chat}`, "--cwd", this.store.state.cwd || this.cwd || "/",
+          "--label", `herdr-chat.tui=${this.chat}`, "--", ...env, ...argv]);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "hc run failed");
         this.handoff.terminal = JSON.parse(r.stdout).address;
         this.handoff.argv = argv;
@@ -1883,13 +1955,13 @@ export default class HerdrChat extends View {
     if (!c) return;
     cx.spawn(async (cx) => {
       try {
-        this.docPanes = modPanes(await readDoc(), MOD);
+        this.docPanes = modPanes(await readDoc(this.machine), MOD, this.machine);
       } catch {}
       const other = this.docPanes?.find((x) => x.props?.chat === c.chat && panes().some((p) => p.pane === x.pane));
       if (other) {
         run("tab.select", { id: other.tab });
         run("pane.focus", { pane: other.pane });
-      } else if (c.terminal) run("agent.focus", { terminal: c.terminal });
+      } else if (c.terminal) run("agent.focus", { terminal: qualify(this.machine, c.terminal) });
       else this.flash("The other chat isn't open in this window", cx);
       this.debug.mark();
       cx.notify();
@@ -1908,6 +1980,8 @@ export default class HerdrChat extends View {
     // shows nothing. The host watches for that itself (host/panewatch.ts): it
     // closes its pane, and the tab with it.
     this.conn?.close();
+    // Another machine's chat: its tunnel goes with the view (the next view starts one).
+    if (this.machine) closeTunnels(this.chat);
   }
 
   // ---- a sub-agent's chat ----------------------------------------------------------
@@ -1944,7 +2018,7 @@ export default class HerdrChat extends View {
     cx.spawn(async (cx) => {
       let open = null;
       try {
-        open = modPanes(await readDoc(), MOD).find((x) => x.props?.chat === this.chat && x.props?.subagent && panes().some((p) => p.pane === x.pane));
+        open = modPanes(await readDoc(this.machine), MOD, this.machine).find((x) => x.props?.chat === this.chat && x.props?.subagent && panes().some((p) => p.pane === x.pane));
       } catch {}
       if (open) {
         run("tab.select", { id: open.tab });

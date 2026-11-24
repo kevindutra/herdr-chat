@@ -34,9 +34,9 @@ export function cantContinue(t) {
   if (!t || t.state !== "live") return { why: "not live" };
   if (t.labels?.["herdr-chat.chat"]) return { why: "already a chat" };
   if (!agentOf(t)) return { why: "not an agent's TUI" };
-  // Another machine's agent ("box/t7"): it runs there, and a chat's host would run here.
+  // Another machine's agent ("box/t7"): its chat runs there too. A sub-agent there isn't handed over (yet).
   const machine = machineOf(t.address);
-  if (machine) return { why: `This agent runs on ${machine}: chats run on this computer only.`, note: `On ${machine}` };
+  if (machine && t.parent) return { why: `A sub-agent on ${machine} can't continue as a chat yet.`, note: `Sub-agent on ${machine}` };
   const st = word(t.status);
   if (st === "working" || st === "blocked") return { why: "Wait for the run to end, then Continue as chat.", note: "Wait for the run to end" };
   if (!["idle", "done"].includes(st)) return { why: `status ${st}` };

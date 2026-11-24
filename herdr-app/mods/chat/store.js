@@ -19,15 +19,41 @@ export class Store {
     this.version = 0; // bumps on every change
     this.snapshots = 0;
     this.loaded = false;
+    // A chat on another machine (machine.js): its items' image paths are that machine's. mapItem
+    // gives the item as shown (the local copies' paths, once copied); `orig` keeps what the host sent,
+    // so remap() can show a copy that has landed since.
+    this.mapItem = null;
+    this.orig = new Map();
   }
 
   reindex() {
     this.index = new Map(this.items.map((it, i) => [it.id, i]));
   }
 
+  shown(it) {
+    if (!this.mapItem) return it;
+    this.orig.set(it.id, it);
+    return this.mapItem(it);
+  }
+
+  // Every item again through mapItem (a local copy landed): true when one changed.
+  remap() {
+    if (!this.mapItem) return false;
+    let changed = false;
+    this.items = this.items.map((it) => {
+      const o = this.orig.get(it.id);
+      const next = o ? this.mapItem(o) : it;
+      if (next !== it && JSON.stringify(next) !== JSON.stringify(it)) { changed = true; return next; }
+      return it;
+    });
+    if (changed) this.version++;
+    return changed;
+  }
+
   snapshot(rec) {
     this.state = { ...EMPTY_STATE, ...(rec.state ?? {}) };
-    this.items = rec.items ?? [];
+    this.orig.clear();
+    this.items = (rec.items ?? []).map((it) => this.shown(it));
     this.hasOlder = Boolean(rec.hasOlder);
     this.seq = rec.seq ?? null;
     this.reindex();
@@ -45,7 +71,8 @@ export class Store {
       for (const [k, v] of Object.entries(rec.state)) next[k] = v;
       this.state = next;
     }
-    for (const it of rec.upsert ?? []) {
+    for (const raw of rec.upsert ?? []) {
+      const it = this.shown(raw);
       const i = this.index.get(it.id);
       if (i === undefined) {
         this.index.set(it.id, this.items.length);
@@ -54,6 +81,7 @@ export class Store {
     }
     if (rec.remove?.length) {
       const gone = new Set(rec.remove);
+      for (const id of gone) this.orig.delete(id);
       this.items = this.items.filter((it) => !gone.has(it.id));
       this.reindex();
     }
@@ -64,7 +92,7 @@ export class Store {
   // Older items from `history`, in front.
   prepend(items, hasOlder) {
     const known = new Set(this.items.map((it) => it.id));
-    this.items = [...items.filter((it) => !known.has(it.id)), ...this.items];
+    this.items = [...items.filter((it) => !known.has(it.id)).map((it) => this.shown(it)), ...this.items];
     this.hasOlder = Boolean(hasOlder);
     this.reindex();
     this.version++;
