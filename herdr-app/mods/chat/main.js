@@ -51,6 +51,7 @@ import { Updater, quiet } from "./update.js";
 import { CodeView, owners } from "./codeview.js";
 import { Viewer, readSvgSize } from "./viewer.js";
 import { TermBar } from "./termbar.js";
+import { contextMenu, menuAt } from "./ctxmenu.js";
 import { DEFAULT_PROVIDER, MOD, PROVIDERS, PROVIDER_NAMES, alpha, homeRel, icon, message, monoFont, plural, relTime, spansText, skillsOf, uiScale, spinner, tildePath, typedText, unwrapHc } from "./util.js";
 
 const COL_MAX = 800;
@@ -2259,10 +2260,54 @@ export default class HerdrChat extends View {
       // A render that throws keeps the last frame: say why in the dump (and on screen).
       this.renderError = `${message(e)} ${String(e?.stack ?? "").split("\n").slice(0, 4).join(" | ")}`;
       this.debug.mark();
-      return div().p(16).text_color(theme().ansi1).child(`render failed: ${this.renderError}`);
+      // Still right-clickable: the menu's terminal items are the way out of a broken chat.
+      return this.withMenu(v_flex().size_full().p(16).gap(8).text_color(theme().ansi1).child(`render failed: ${this.renderError}`)
+        .child(div().text_size(12).text_color(theme().dim).child("Right-click for the terminal")), theme());
     }
     this.renderError = null;
-    return el;
+    return this.withMenu(el, theme());
+  }
+
+  // The chat (or its error screen) with the right-click menu (ctxmenu.js) over it.
+  withMenu(el, t) {
+    const pick = (it, cx) => { this.ctxMenu = null; it.run(cx); this.debug.mark(); cx.notify(); };
+    return div().id("herdr-chat-frame").relative().size_full()
+      .on_size_change((sz) => { this.framePt = { w: sz.width, h: sz.height }; })
+      .on_mouse_down("right", (e, cx) => {
+        this.ctxMenu = { at: menuAt(e, this.framePt), item: this.hover ?? null };
+        this.debug.mark();
+        cx.notify();
+      })
+      .child(el)
+      .when(Boolean(this.ctxMenu), (e) => e.child(contextMenu(this.ctxMenu.at, this.menuItems(this.ctxMenu.item), t,
+        { onPick: pick, onClose: (cx) => { this.ctxMenu = null; cx.notify(); } })));
+  }
+
+  // The right-click menu's items; `id`: the message under the pointer, if any.
+  menuItems(id) {
+    const out = [];
+    const it = id ? this.store.get(id) : null;
+    if (it && (it.kind === "user" || it.kind === "assistant")) {
+      out.push({ label: "Copy message", icon: "copy", run: (cx) => this.control(`copy:${it.id}`, cx) });
+      if (it.kind === "user" && !this.sub) out.push({ label: "Edit and resend", icon: "pencil", run: (cx) => this.control(`edit:${it.id}`, cx) });
+      out.push({ sep: true });
+    }
+    const handoff = this.handoff?.terminal ?? this.store.state.handoff?.terminal ?? null;
+    if (handoff) {
+      out.push({ label: "Show terminal UI", icon: "terminal", run: (cx) => this.showHandoff(cx) });
+      out.push({ label: "Back to chat", icon: "message", note: "quits it", run: (cx) => this.returnToChat(cx) });
+    } else {
+      const no = this.sub ? "sub-agent" : this.caps()?.tui === false ? "none" : null;
+      out.push({ label: "Continue in terminal", icon: "terminal", key: keyHint("tui"), note: no, run: no ? null : (cx) => this.shortcut("tui", cx) });
+    }
+    out.push({ label: "Show host output", icon: "code", run: (cx) => this.showTranscript(cx) });
+    if (this.conn?.status === "stopped" || this.conn?.status === "failed") out.push({ label: "Restart chat host", icon: "rotate", run: (cx) => this.control("restart", cx) });
+    if (!this.sub) {
+      out.push({ sep: true });
+      out.push({ label: "Resume a session…", icon: "clock", key: keyHint("resume"), run: (cx) => this.shortcut("resume", cx) });
+      out.push({ label: "New chat", icon: "plus", key: keyHint("newChat"), run: (cx) => this.shortcut("newChat", cx) });
+    }
+    return out;
   }
 
   renderChat(cx) {
